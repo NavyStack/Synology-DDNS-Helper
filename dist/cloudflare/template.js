@@ -89,7 +89,7 @@ function buildAuthHeaders(account, pwd) {
     return null;
 }
 function buildTagDescription() {
-    return `Set by github.com/navystack via SynologyDDNSProject on ${new Date().toISOString()}`;
+    return `Set by github.com/NavyStack/Synology-DDNS-Helper on ${new Date().toISOString()}`;
 }
 function executeHttpsRequest(url, headers, method = HttpMethod.GET, data) {
     return new Promise((resolve, reject) => {
