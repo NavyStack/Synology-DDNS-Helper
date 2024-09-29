@@ -144,7 +144,7 @@ function buildAuthHeaders(account: string, pwd: string): ApiHeaders | null {
 }
 
 function buildTagDescription(): string {
-  return `Set by github.com/navystack via SynologyDDNSProject on ${new Date().toISOString()}`
+  return `Set by github.com/NavyStack/Synology-DDNS-Helper on ${new Date().toISOString()}`
 }
 
 function executeHttpsRequest<T>(

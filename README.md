@@ -8,6 +8,7 @@
 
 - **Cloudflare DDNS 업데이트 지원**: 최대 10개의 Cloudflare DDNS 섹션을 자동으로 추가합니다.
 - **Synology NAS와 완벽한 통합**: Synology NAS에 기본 설치된 Node.js를 활용합니다.
+- **Comment 기록**: Cloudflare의 DNS 레코드 확인에 영향을 주지 않으며, 사용자 자체의 참조용으로만 사용되는 주석 기록 [Record attributes](https://developers.cloudflare.com/dns/manage-dns-records/reference/record-attributes/)
 - **TypeScript로 구현**: 타입 안정성을 보장하고, 유지보수가 쉬워졌습니다.
 - **확장 가능한 구조**: 현재는 Cloudflare만 지원하지만, 향후 다른 DDNS 제공자도 쉽게 통합할 수 있도록 설계되었습니다.
 
