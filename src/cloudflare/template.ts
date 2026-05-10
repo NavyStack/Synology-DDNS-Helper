@@ -1,30 +1,36 @@
 #!/usr/bin/env node
 
-import https from 'https'
+import https from 'node:https'
+import type { ClientRequest, IncomingMessage } from 'node:http'
+import { isIPv4, isIPv6 } from 'node:net'
 
-// ------------------- Enums ---------------------
+const STATUS = {
+  GOOD: 'good',
+  NOCHG: 'nochg',
+  BAD_AUTH: 'badauth',
+  BAD_PARAM: 'badparam',
+  NO_HOST: 'nohost',
+  NUM_HOST: 'numhost',
+  ERROR: '911'
+} as const
+type Status = (typeof STATUS)[keyof typeof STATUS]
 
-enum HttpMethod {
-  GET = 'GET',
-  POST = 'POST',
-  PUT = 'PUT'
-}
+const SUCCESS_STATUSES = new Set<Status>([STATUS.GOOD, STATUS.NOCHG])
 
-enum ExitCode {
-  BAD_PARAM = 'badparam',
-  BAD_AUTH = 'badauth',
-  NO_HOST = 'nohost',
-  GOOD = 'good',
-  UPDATE_FAILED = 'Update Record failed',
-  CREATE_FAILED = 'Failed to create new record',
-  ERROR = 'error'
-}
+const USER_AGENT = 'Synology-DDNS-Helper'
+const REQUEST_TIMEOUT_MS = 15000
+const HOSTNAME_DELIMITER = '---'
 
-// ------------------- Types & Interfaces ---------------------
+const CF_AUTH_ERROR_CODES = new Set([
+  6003, 6111, 7000, 7003, 9106, 9109, 9111, 9201, 10000
+])
 
-interface ApiHeaders {
-  [key: string]: string
-}
+const GLOBAL_API_KEY_PATTERN = /^[0-9a-z]{37}$/i
+const TOKEN_BEARER_PREFIX = 'cfut_'
+
+type RecordType = 'A' | 'AAAA'
+type Headers = Record<string, string>
+type HttpMethod = 'GET' | 'POST' | 'PUT'
 
 interface ApiError {
   code: number
@@ -36,6 +42,13 @@ interface ApiResponse<T> {
   errors: ApiError[]
   messages: ApiError[]
   result?: T
+  result_info?: {
+    page: number
+    per_page: number
+    total_pages: number
+    count: number
+    total_count: number
+  }
 }
 
 interface DnsRecord {
@@ -45,7 +58,6 @@ interface DnsRecord {
   content: string
   ttl: number
   proxied: boolean
-  comment: string
 }
 
 interface Zone {
@@ -53,251 +65,274 @@ interface Zone {
   name: string
 }
 
-// Extract command-line arguments
-const [account, pwd, hostname, ip] = process.argv.slice(2)
-
-if (!account || !pwd || !hostname || !ip) {
-  exitWithMessage(ExitCode.BAD_PARAM)
+interface RawResponse<T> {
+  status: number
+  body: ApiResponse<T>
 }
 
-// Validate hostname and IP
-if (!isValidHostname(hostname) || !isValidIP(ip)) {
-  exitWithMessage(ExitCode.BAD_PARAM)
-}
+class AuthError extends Error {}
 
-// Build authentication headers
-const headers = buildAuthHeaders(account, pwd)
-if (!headers) {
-  exitWithMessage(ExitCode.BAD_AUTH)
-}
-
-// Main execution
-;(async () => {
-  try {
-    const zoneId = await fetchZoneId(hostname, headers)
-    if (!zoneId) exitWithMessage(ExitCode.NO_HOST)
-
-    const recordInfo = await fetchDnsRecordInfo(zoneId, hostname, headers)
-    const tagDescription = buildTagDescription()
-
-    if (recordInfo) {
-      const updateStatus = await updateDnsRecord(
-        zoneId,
-        recordInfo.id,
-        hostname,
-        ip,
-        recordInfo.ttl,
-        recordInfo.proxied,
-        headers,
-        tagDescription
-      )
-      exitWithMessage(updateStatus ? ExitCode.GOOD : ExitCode.UPDATE_FAILED)
-    } else {
-      const createStatus = await createDnsRecord(
-        zoneId,
-        hostname,
-        ip,
-        headers,
-        tagDescription
-      )
-      exitWithMessage(createStatus ? ExitCode.GOOD : ExitCode.CREATE_FAILED)
-    }
-  } catch (error) {
-    console.error('Unexpected error:', error)
-    exitWithMessage(ExitCode.ERROR)
-  }
-})()
-
-// ------------- Utility Functions ---------------
-
-function exitWithMessage(message: ExitCode): never {
-  console.log(message)
-  process.exit(1)
+function exitWith(status: Status): never {
+  console.log(status)
+  process.exit(SUCCESS_STATUSES.has(status) ? 0 : 1)
 }
 
 function isValidHostname(hostname: string): boolean {
-  const hostnameRegex =
-    /^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$/
-  return hostnameRegex.test(hostname)
+  return /^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$/.test(
+    hostname
+  )
 }
 
-function isValidIP(ip: string): boolean {
-  const ipv4Regex =
-    /^(25[0-5]|2[0-4]\d|[01]?\d\d?)\.(25[0-5]|2[0-4]\d|[01]?\d\d?)\.(25[0-5]|2[0-4]\d|[01]?\d\d?)\.(25[0-5]|2[0-4]\d|[01]?\d\d?)$/
-  return ipv4Regex.test(ip)
-}
-
-function buildAuthHeaders(account: string, pwd: string): ApiHeaders | null {
-  if (pwd.length === 37) {
-    return {
-      'X-Auth-Email': account,
-      'X-Auth-Key': pwd,
-      'Content-Type': 'application/json'
-    }
-  } else if (pwd.length === 40) {
-    return {
-      Authorization: `Bearer ${pwd}`,
-      'Content-Type': 'application/json'
-    }
-  }
+function detectRecordType(ip: string): RecordType | null {
+  if (isIPv4(ip)) return 'A'
+  if (isIPv6(ip)) return 'AAAA'
   return null
 }
 
-function buildTagDescription(): string {
+function buildAuthHeaders(account: string, secret: string): Headers {
+  const base: Headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': USER_AGENT
+  }
+  if (secret.startsWith(TOKEN_BEARER_PREFIX)) {
+    return { ...base, Authorization: `Bearer ${secret}` }
+  }
+  if (GLOBAL_API_KEY_PATTERN.test(secret) && account.includes('@')) {
+    return { ...base, 'X-Auth-Email': account, 'X-Auth-Key': secret }
+  }
+  return { ...base, Authorization: `Bearer ${secret}` }
+}
+
+function buildComment(): string {
   return `Set by github.com/NavyStack/Synology-DDNS-Helper on ${new Date().toISOString()}`
 }
 
-function executeHttpsRequest<T>(
+function request<T>(
   url: string,
-  headers: ApiHeaders,
-  method: HttpMethod = HttpMethod.GET,
-  data?: object
-): Promise<ApiResponse<T>> {
+  headers: Headers,
+  method: HttpMethod = 'GET',
+  body?: object
+): Promise<RawResponse<T>> {
   return new Promise((resolve, reject) => {
-    const options: https.RequestOptions = {
-      method,
-      headers
-    }
-
-    const req = https.request(url, options, (res) => {
-      let responseData = ''
-
-      res.on('data', (chunk) => {
-        responseData += chunk
-      })
-
-      res.on('end', () => {
-        try {
-          const result: ApiResponse<T> = JSON.parse(responseData)
-          if (result && result.success) {
-            resolve(result)
-          } else {
-            const errorDetails = result.errors?.[0]?.message || 'Unknown error'
-            console.error(`API request failed with message: ${errorDetails}`)
-            reject(new Error(errorDetails))
+    const req: ClientRequest = https.request(
+      url,
+      { method, headers, timeout: REQUEST_TIMEOUT_MS },
+      (res: IncomingMessage) => {
+        let data = ''
+        res.setEncoding('utf-8')
+        res.on('data', (chunk) => {
+          data += chunk
+        })
+        res.on('end', () => {
+          try {
+            resolve({
+              status: res.statusCode ?? 0,
+              body: JSON.parse(data) as ApiResponse<T>
+            })
+          } catch (err) {
+            reject(
+              err instanceof Error
+                ? new Error(`invalid json from ${url}: ${err.message}`)
+                : new Error(String(err))
+            )
           }
-        } catch (error) {
-          reject(error)
-        }
-      })
-    })
-
-    req.on('error', (error) => {
-      reject(error)
-    })
-
-    if (data) {
-      req.write(JSON.stringify(data))
-    }
-
+        })
+      }
+    )
+    req.on('timeout', () => req.destroy(new Error(`request timeout: ${url}`)))
+    req.on('error', reject)
+    if (body) req.write(JSON.stringify(body))
     req.end()
   })
 }
 
-async function fetchZoneId(
-  hostname: string,
-  headers: ApiHeaders
-): Promise<string | null> {
-  const url = 'https://api.cloudflare.com/client/v4/zones'
-  try {
-    const response = await executeHttpsRequest<Zone[]>(url, headers)
-    if (response && response.result) {
-      for (const zone of response.result) {
-        if (
-          hostname.toLowerCase() === zone.name.toLowerCase() ||
-          hostname.toLowerCase().endsWith(`.${zone.name.toLowerCase()}`)
-        ) {
-          return zone.id
-        }
-      }
+async function requestWithRetry<T>(
+  url: string,
+  headers: Headers,
+  method: HttpMethod = 'GET',
+  body?: object
+): Promise<RawResponse<T>> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await request<T>(url, headers, method, body)
+      if (res.status < 500) return res
+      lastErr = new Error(`http ${res.status} from ${url}`)
+    } catch (err) {
+      lastErr = err
     }
-    return null
-  } catch (error) {
-    console.error(error)
-    return null
+    if (attempt === 0) await sleep(500)
   }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
 }
 
-async function fetchDnsRecordInfo(
+function unwrap<T>(res: RawResponse<T>): T | undefined {
+  const { status, body } = res
+  if (body.success) return body.result
+  const err = body.errors?.[0]
+  const message = err?.message ?? `http ${status}`
+  const isAuth =
+    status === 401 ||
+    status === 403 ||
+    (err !== undefined && CF_AUTH_ERROR_CODES.has(err.code))
+  if (isAuth) throw new AuthError(message)
+  throw new Error(`cloudflare api error (${err?.code ?? status}): ${message}`)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function fetchAllZones(headers: Headers): Promise<Zone[]> {
+  const all: Zone[] = []
+  let page = 1
+  while (true) {
+    const url = `https://api.cloudflare.com/client/v4/zones?per_page=50&page=${page}`
+    const res = await requestWithRetry<Zone[]>(url, headers)
+    const zones = unwrap(res) ?? []
+    all.push(...zones)
+    const totalPages = res.body.result_info?.total_pages ?? 1
+    if (page >= totalPages) break
+    page++
+  }
+  return all
+}
+
+function findZone(zones: Zone[], hostname: string): Zone | null {
+  const target = hostname.toLowerCase().replace(/\.$/, '')
+  let best: Zone | null = null
+  for (const zone of zones) {
+    const name = zone.name.toLowerCase()
+    if (target === name || target.endsWith(`.${name}`)) {
+      if (!best || name.length > best.name.length) best = zone
+    }
+  }
+  return best
+}
+
+async function findRecords(
   zoneId: string,
   hostname: string,
-  headers: ApiHeaders
-): Promise<DnsRecord | null> {
-  const url = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${encodeURIComponent(
-    hostname
-  )}`
-  try {
-    const response = await executeHttpsRequest<DnsRecord[]>(url, headers)
-    return response.result && response.result.length > 0
-      ? response.result[0]
-      : null
-  } catch (error) {
-    console.error(error)
-    return null
-  }
+  type: RecordType,
+  headers: Headers
+): Promise<DnsRecord[]> {
+  const url = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=${type}&name=${encodeURIComponent(hostname)}`
+  const res = await requestWithRetry<DnsRecord[]>(url, headers)
+  return unwrap(res) ?? []
 }
 
-async function createDnsRecord(
+async function createRecord(
   zoneId: string,
   hostname: string,
   ip: string,
-  headers: ApiHeaders,
-  tagDescription: string
+  type: RecordType,
+  headers: Headers
 ): Promise<boolean> {
   const url = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`
-  const data = {
-    type: 'A',
+  const body = {
+    type,
     name: hostname,
     content: ip,
     ttl: 120,
     proxied: false,
-    comment: tagDescription
+    comment: buildComment()
   }
-
-  try {
-    const response = await executeHttpsRequest<DnsRecord>(
-      url,
-      headers,
-      HttpMethod.POST,
-      data
-    )
-    return !!response.result
-  } catch (error) {
-    console.error(error)
-    return false
-  }
+  const res = await requestWithRetry<DnsRecord>(url, headers, 'POST', body)
+  return !!unwrap(res)
 }
 
-async function updateDnsRecord(
+async function updateRecord(
   zoneId: string,
-  recordId: string,
+  record: DnsRecord,
   hostname: string,
   ip: string,
-  ttl: number,
-  proxied: boolean,
-  headers: ApiHeaders,
-  tagDescription: string
+  type: RecordType,
+  headers: Headers
 ): Promise<boolean> {
-  const url = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${recordId}`
-  const data = {
-    type: 'A',
+  const url = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${record.id}`
+  const body = {
+    type,
     name: hostname,
     content: ip,
-    ttl,
-    proxied,
-    comment: tagDescription
+    ttl: record.ttl,
+    proxied: record.proxied,
+    comment: buildComment()
+  }
+  const res = await requestWithRetry<DnsRecord>(url, headers, 'PUT', body)
+  return !!unwrap(res)
+}
+
+async function processHost(
+  hostname: string,
+  ip: string,
+  type: RecordType,
+  zones: Zone[],
+  headers: Headers
+): Promise<Status> {
+  const zone = findZone(zones, hostname)
+  if (!zone) return STATUS.NO_HOST
+
+  const records = await findRecords(zone.id, hostname, type, headers)
+  if (records.length > 1) return STATUS.NUM_HOST
+
+  const existing = records[0]
+  if (!existing) {
+    const ok = await createRecord(zone.id, hostname, ip, type, headers)
+    return ok ? STATUS.GOOD : STATUS.ERROR
   }
 
-  try {
-    const response = await executeHttpsRequest<DnsRecord>(
-      url,
-      headers,
-      HttpMethod.PUT,
-      data
-    )
-    return !!response.result
-  } catch (error) {
-    console.error(error)
-    return false
-  }
+  if (existing.content === ip) return STATUS.NOCHG
+  const ok = await updateRecord(zone.id, existing, hostname, ip, type, headers)
+  return ok ? STATUS.GOOD : STATUS.ERROR
 }
+
+const FAILURE_PRIORITY: Status[] = [
+  STATUS.BAD_AUTH,
+  STATUS.BAD_PARAM,
+  STATUS.NO_HOST,
+  STATUS.NUM_HOST,
+  STATUS.ERROR
+]
+
+function summarize(results: Status[]): Status {
+  for (const status of FAILURE_PRIORITY) {
+    if (results.includes(status)) return status
+  }
+  return results.includes(STATUS.GOOD) ? STATUS.GOOD : STATUS.NOCHG
+}
+
+async function run(): Promise<Status> {
+  const [account, secret, hostnamesArg, ip] = process.argv.slice(2)
+  if (!account || !secret || !hostnamesArg || !ip) return STATUS.BAD_PARAM
+
+  const recordType = detectRecordType(ip)
+  if (!recordType) return STATUS.BAD_PARAM
+
+  const hostnames = hostnamesArg
+    .split(HOSTNAME_DELIMITER)
+    .map((h) => h.trim())
+    .filter((h) => h.length > 0)
+  if (hostnames.length === 0) return STATUS.BAD_PARAM
+  if (!hostnames.every(isValidHostname)) return STATUS.BAD_PARAM
+
+  const headers = buildAuthHeaders(account, secret)
+  const zones = await fetchAllZones(headers)
+
+  const results: Status[] = []
+  for (const hostname of hostnames) {
+    results.push(await processHost(hostname, ip, recordType, zones, headers))
+  }
+  return summarize(results)
+}
+
+run()
+  .then(exitWith)
+  .catch((err: unknown) => {
+    if (err instanceof AuthError) {
+      console.error(`auth failed: ${err.message}`)
+      exitWith(STATUS.BAD_AUTH)
+    } else {
+      console.error('unexpected error:', err instanceof Error ? err.message : err)
+      exitWith(STATUS.ERROR)
+    }
+  })
