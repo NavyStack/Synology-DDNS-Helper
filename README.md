@@ -21,33 +21,40 @@
 ## 주요 기능
 
 - **Cloudflare DDNS 업데이트 지원**: 최대 10개의 Cloudflare DDNS 섹션을 자동으로 추가합니다.
-- **Synology NAS와 완벽한 통합**: Synology NAS에 기본 설치된 Node.js를 활용합니다.
-- **Comment 기록**: Cloudflare의 DNS 레코드 확인에 영향을 주지 않으며, 사용자 자체의 참조용으로만 사용되는 주석 기록 [Record attributes](https://developers.cloudflare.com/dns/manage-dns-records/reference/record-attributes/)
-- **TypeScript로 구현**: 타입 안정성을 보장하고, 유지보수가 쉬워졌습니다.
-- **확장 가능한 구조**: 현재는 Cloudflare만 지원하지만, 향후 다른 DDNS 제공자도 쉽게 통합할 수 있도록 설계되었습니다.
+- **IPv4 / IPv6 모두 지원**: 입력된 IP에 따라 `A` 또는 `AAAA` 레코드로 자동 분기합니다.
+- **다중 인증 방식 자동 감지**: Global API Key, API Token, DDNS 전용 토큰(`cfut_`) 모두 동일한 입력란으로 처리합니다.
+- **다중 호스트 지원**: 호스트 이름 입력란에 `---`로 구분하여 여러 호스트를 한 번에 갱신할 수 있습니다.
+- **변경 없음 단축 처리**: 현재 IP가 동일하면 `nochg`만 반환하고 API 호출을 절감합니다.
+- **원자적 설정 업데이트**: `ddns_provider.conf`를 `.bak` 백업 + `.tmp` 후 `rename`으로 안전하게 교체합니다.
+- **타임아웃 및 재시도**: HTTPS 호출에 15초 타임아웃과 5xx 응답 1회 재시도가 적용됩니다.
+- **Comment 기록**: Cloudflare 레코드에 마지막 갱신 시각을 코멘트로 기록합니다 ([Record attributes](https://developers.cloudflare.com/dns/manage-dns-records/reference/record-attributes/)).
+- **TypeScript + esbuild**: 강한 타입 검사와 단일 파일 번들로 배포합니다.
 
 ## 요구사항
 
-- Node.js가 설치된 **Synology NAS** (일반적으로 기본 제공)
+- Node.js **18 이상**이 설치된 **Synology NAS** (DSM 7.x 이상에 기본 제공)
 - 템플릿 파일을 다운로드할 수 있는 인터넷 연결
+- 대상 도메인이 등록된 Cloudflare 계정과 다음 권한을 가진 토큰 또는 키
+  - **권장**: API Token — `Zone : DNS : Edit` + `Zone : Zone : Read` (해당 zone 한정)
+  - 또는 DDNS 전용 토큰(`cfut_…`)
+  - 또는 Global API Key (이메일과 함께)
 
 ## 설치
 
 ### 전제조건
 
-- Cloudflare에 등록된 도메인이 있어야 합니다.
-- DDNS로 사용할 도메인 레코드가 Cloudflare에 등록되어 있어야 합니다.
+- Cloudflare에 도메인이 등록되어 있어야 합니다.
+- DDNS로 사용할 zone이 활성 상태여야 합니다.
 
 ### 설치 방법
 
 1. **Synology NAS 제어판에서 작업 스케줄러 설정**
 
-   - 제어판에서 **작업 스케줄러**를 실행하고 **사용자 정의 스크립트**를 생성합니다.
-   - 설정은 다음과 같이 합니다:
+   - 제어판 → **작업 스케줄러** → **사용자 정의 스크립트** 생성
 
    ```
    [일반 설정]
-   작업 이름: Cloudflare DDNS (원하는 이름으로 설정 가능)
+   작업 이름: Cloudflare DDNS (원하는 이름)
    사용자: root
    이벤트: 부트업
    활성화됨: 체크
@@ -55,61 +62,76 @@
 
 2. **작업 내용 입력**
 
-   작업 스케줄러의 작업 내용에 다음 명령어를 입력합니다:
-
    ```bash
    curl https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/main.js | node
    ```
 
-   이 명령어는 스크립트의 최신 버전을 다운로드하고 Synology NAS에서 실행합니다.
+   이 명령은 최신 인스톨러를 다운로드해 즉시 실행합니다 (esbuild로 번들링되어 단일 파일로 동작).
 
-## 설정 및 사용 방법
+3. **DDNS 등록 (제어판 → 외부 액세스 → DDNS)**
 
-1. **스크립트 실행**:
-
-   - 스크립트 실행을 위해 Synology NAS의 관리자 권한이 필요합니다.
-
-   스크립트는 다음 작업을 수행합니다:
-
-   - `/etc.defaults/ddns_provider.conf` 파일을 읽어옵니다.
-   - 기존 Cloudflare 섹션을 모두 제거합니다.
-   - [템플릿 URL](https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/template.js)에서 최신 Cloudflare DDNS 템플릿을 다운로드합니다.
-   - 최대 10개의 Cloudflare DDNS 구성을 추가합니다.
-
-2. **권한 설정**:
-   - 다운로드된 템플릿 파일은 자동으로 `755` 권한으로 설정됩니다.
+   | 필드 | 값 |
+   | --- | --- |
+   | 서비스 공급자 | `Cloudflare 01` (10개 중 아무거나) |
+   | 호스트 이름 | `home.example.com` 또는 `a.com---b.com---c.com` |
+   | 사용자 이름/이메일 | API Token / DDNS 토큰 사용 시 임의 값, Global API Key 사용 시 Cloudflare 계정 이메일 |
+   | 패스워드/키 | API Token / DDNS 토큰 / Global API Key |
 
 ## 작동 원리
 
-스크립트는 다음 단계로 작동합니다:
+### 인스톨러 (`main.js`)
 
-1. **구성 파일 읽기**: `ddns_provider.conf` 파일을 읽습니다.
-2. **기존 Cloudflare 섹션 제거**: 중복을 방지하기 위해 기존의 Cloudflare 항목을 제거합니다.
-3. **템플릿 다운로드**: Cloudflare DDNS 템플릿을 가져와 최대 10개의 Cloudflare 섹션을 생성합니다.
-4. **구성 파일 업데이트**: 새롭게 구성된 Cloudflare 항목을 포함하여 `ddns_provider.conf`에 저장합니다.
+1. `/etc.defaults/ddns_provider.conf`를 읽고 `.bak`로 백업합니다.
+2. 임시 디렉토리에 [template.js](https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/template.js)를 한 번만 다운로드합니다.
+3. `/usr/syno/bin/ddns/cloudflare01.js` ~ `cloudflare10.js` 10개 위치로 복사하고 권한 `0755`로 설정합니다.
+4. 기존 `[Cloudflare …]` 섹션을 제거한 뒤 새 섹션 10개를 추가하고, `.tmp` + `rename`으로 원자적으로 저장합니다.
 
-### 템플릿 세부 정보
+### 런타임 템플릿 (`template.js`)
 
-[template.js](https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/template.js) 파일은 Cloudflare DDNS 업데이트를 처리하는 로직을 포함하고 있습니다. 이 로직은 매개변수 유효성 검사, 인증 헤더 생성, 그리고 DNS 레코드의 생성 및 업데이트를 관리합니다.
+Synology DDNS 프레임워크가 호출할 때마다 다음을 수행합니다:
 
-## 커스터마이징 및 확장
+1. argv 검증 (사용자/시크릿/호스트/IP).
+2. IP에서 record type 자동 결정 (`A` / `AAAA`).
+3. 시크릿 형태로 인증 모드 자동 분기:
+   - `cfut_` prefix → Bearer 헤더
+   - 37자 영숫자 + 이메일 → Global API Key (`X-Auth-Email` + `X-Auth-Key`)
+   - 그 외 → Bearer 헤더
+4. zone 목록을 페이지네이션으로 모두 수집하고 호스트와 가장 길게 일치하는 zone 선택.
+5. 해당 zone에서 동일 type/이름의 레코드 조회:
+   - 0개 → 신규 생성 (TTL 120, proxied false).
+   - 1개 + IP 동일 → `nochg`.
+   - 1개 + IP 변경 → 업데이트 (기존 TTL/proxied 보존).
+   - 2개 이상 → `numhost`.
+6. 다중 호스트 입력은 `---`로 split해 각각 처리한 뒤 결과를 종합합니다.
 
-**현재는 Cloudflare만 지원**하지만, 이 스크립트는 구조상 다른 DDNS 제공자로 확장하기 쉽게 설계되었습니다. 스크립트를 수정하여 템플릿 다운로드 URL을 업데이트하고, 새로운 제공자의 API에 맞게 로직을 조정하면 추가 제공자를 지원할 수 있습니다.
+### Synology DDNS 응답 코드
+
+| 출력 | 의미 | 종료 코드 |
+| --- | --- | --- |
+| `good` | 신규 생성 또는 업데이트 성공 | 0 |
+| `nochg` | 변경 없음 | 0 |
+| `badauth` | 인증 실패 | 1 |
+| `badparam` | 잘못된 파라미터 | 1 |
+| `nohost` | zone 매칭 실패 | 1 |
+| `numhost` | 동일 호스트의 레코드가 2개 이상 | 1 |
+| `911` | 일반 오류 (네트워크/타임아웃 등) | 1 |
 
 ## 문제 해결
 
-- **구성 파일 문제**: 스크립트가 `ddns_provider.conf` 파일을 읽거나 쓸 수 없을 경우, 권한을 확인하십시오. 필요하다면 `sudo`로 스크립트를 실행하세요.
-- **다운로드 오류**: 템플릿 다운로드가 실패할 경우, 인터넷 연결을 확인하고 URL이 올바른지 확인하십시오.
+- **`badauth`가 반복**: API Token에 zone DNS 편집 권한이 있는지, Cloudflare 대시보드 → My Profile → API Tokens에서 확인하세요.
+- **`nohost`가 반복**: 토큰이 해당 zone을 볼 수 있어야 합니다. zone:read 권한 누락이 가장 흔한 원인입니다.
+- **설치 실패**: `ddns_provider.conf` 권한을 확인하고 `sudo`로 실행하세요. 설치 실패 시 `${configPath}.bak`에 원본이 남아 있습니다.
+- **로그 확인**: `/var/log/ddns_provider.log`에 모듈 호출 결과가 기록됩니다.
 
 ## 개발
 
-프로젝트를 개발하거나 수정하려면 TypeScript 및 Node.js 타입 정의를 설치하세요:
-
 ```bash
-pnpm install --save-dev typescript @types/node
+pnpm install
+pnpm run typecheck
+pnpm run build
 ```
 
-프로젝트는 TypeScript 5.6.2 및 Node.js typings 버전 22.7.4에 맞게 구성되어 있습니다. 필요에 따라 `package.json`에서 이를 수정할 수 있습니다.
+빌드 산출물은 `dist/cloudflare/`에 생성되며, 저장소에 커밋되어야 `curl | node` 설치 흐름이 동작합니다.
 
 ## 프로젝트 구조
 
@@ -117,24 +139,24 @@ pnpm install --save-dev typescript @types/node
 .
 ├── LICENSE
 ├── README.md
+├── CHANGELOG.md
 ├── dist
 │   └── cloudflare
-│       ├── main.js
-│       ├── php.js
-│       └── template.js
-├── node_modules
+│       ├── main.js        # 인스톨러 (번들)
+│       ├── php.js         # PHP 변형 인스톨러 (deprecated, 번들)
+│       └── template.js    # DDNS 런타임 (번들)
+├── src
+│   └── cloudflare
+│       ├── installer.ts   # 공통 설치 로직
+│       ├── main.ts        # JS 인스톨러 진입점
+│       ├── php.ts         # PHP 인스톨러 진입점 (deprecated)
+│       └── template.ts    # DDNS 런타임
 ├── package.json
 ├── pnpm-lock.yaml
-├── src
-│   ├── cloudflare
-│   │   ├── main.ts
-│   │   ├── php.ts
-│   │   ├── template.ts
-│   │   └── type
-│   │       └── example.d.ts
-│   └── type
 └── tsconfig.json
 ```
+
+> ⚠️ `php.ts` / `php.js`는 외부 PHP 템플릿 저장소에 의존하는 레거시 변형이며, 이후 메이저 버전에서 제거될 예정입니다.
 
 ## 라이선스
 
@@ -148,110 +170,115 @@ pnpm install --save-dev typescript @types/node
 
 버그 제보나 새로운 기능 제안은 언제든지 이슈를 열거나 풀 요청을 제출해 주세요.
 
-## 참고 사항
-
-- **현재는 Cloudflare만 지원**합니다. 다른 DDNS 제공자와 연동하려면 스크립트를 수정해야 합니다.
-- 제공된 URL을 통해 템플릿 파일을 정기적으로 업데이트하여 Cloudflare의 API에 따른 DDNS 기능이 최신 상태를 유지합니다.
-
 ---
-
-ENG
 
 ## Overview
 
-**Synology-DDNS-Helper** is a Node.js-based script designed to enhance the DDNS update functionality of Synology NAS by integrating it with the **Cloudflare DDNS service**. It is implemented in modern TypeScript, ensuring strong type safety and ease of maintenance. **Currently, it only supports Cloudflare**, but it is designed with the flexibility to be expanded to other DDNS providers in the future.
+**Synology-DDNS-Helper** is a Node.js script that integrates Synology NAS's DDNS update mechanism with **Cloudflare**. It is implemented in modern TypeScript and bundled with esbuild into self-contained scripts. Cloudflare is the only supported provider today, but the architecture is designed for easy extension.
 
 ## Key Features
 
-- **Cloudflare DDNS Update Support**: Automatically adds up to 10 configurable Cloudflare DDNS sections.
-- **Seamless Integration with Synology NAS**: Utilises Synology's built-in Node.js support.
-- **Implemented in TypeScript**: Provides type safety and improved maintainability.
-- **Expandable Architecture**: While currently supporting only Cloudflare, it is structured to integrate other DDNS providers with ease in the future.
+- **Cloudflare DDNS update** — registers up to 10 configurable Cloudflare DDNS sections.
+- **IPv4 and IPv6** — chooses `A` or `AAAA` automatically from the IP argument.
+- **Multiple credential types** — Global API Key, API Token, and DDNS-only `cfut_` tokens are auto-detected.
+- **Multi-host input** — separate hostnames with `---` to update many at once.
+- **`nochg` short-circuit** — skips API writes when the IP hasn't changed.
+- **Atomic config updates** — backup (`.bak`), temp file, then `rename`.
+- **Timeout + retry** — 15-second HTTPS timeout, single retry on 5xx.
+- **Audit comment** — each record gets a comment with the last update timestamp.
+- **TypeScript + esbuild** — type-safe source, single-file bundles.
 
 ## Requirements
 
-- **Synology NAS** with Node.js installed (generally included by default)
-- Internet access to download the template files
+- **Synology NAS** with Node.js 18 or newer (default on DSM 7.x).
+- Internet access to fetch the bundled templates.
+- A Cloudflare account with one of:
+  - **Recommended**: API Token with `Zone : DNS : Edit` + `Zone : Zone : Read` scoped to the target zone.
+  - DDNS token (`cfut_…`).
+  - Legacy Global API Key (paired with the account email).
 
 ## Installation
 
-### Prerequisites
-
-- You must have a domain registered with Cloudflare.
-- The domain record you wish to use for DDNS should already be set up in Cloudflare.
-
-### Installation Steps
-
-1. **Configure Task Scheduler in Synology NAS**
-
-   - Open the **Task Scheduler** from the Synology Control Panel and create a **User-defined Script**.
-   - Configure the settings as follows:
+1. **Open Synology Control Panel → Task Scheduler** and create a User-defined Script:
 
    ```
    [General Settings]
-   Task Name: Cloudflare DDNS (you may choose your preferred name)
+   Task Name: Cloudflare DDNS
    User: root
    Event: Boot-up
-   Enabled: Check
+   Enabled: ✓
    ```
 
-2. **Enter the Task Script**
-
-   Enter the following command in the task script section:
+2. **Task command**:
 
    ```bash
    curl https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/main.js | node
    ```
 
-   This command will download and execute the latest version of the script directly on your Synology NAS.
+3. **Register a DDNS entry** in *Control Panel → External Access → DDNS*:
 
-## Configuration and Usage
-
-1. **Executing the Script**:
-
-   - Ensure you have administrative privileges on your Synology NAS.
-
-   The script performs the following tasks:
-
-   - Reads the existing DDNS configuration from `/etc.defaults/ddns_provider.conf`.
-   - Removes any existing Cloudflare sections.
-   - Downloads the latest Cloudflare DDNS template from the [template URL](https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/template.js).
-   - Adds up to 10 Cloudflare DDNS configurations.
-
-2. **Permission Settings**:
-   - The downloaded template files will have their permissions automatically set to `755`.
+   | Field | Value |
+   | --- | --- |
+   | Service Provider | `Cloudflare 01` (any of the ten) |
+   | Hostname | `home.example.com` or `a.com---b.com---c.com` |
+   | Username/Email | Any value for API/DDNS tokens, account email for Global API Key |
+   | Password/Key | API Token / `cfut_…` / Global API Key |
 
 ## How It Works
 
-The script follows these steps:
+### Installer (`main.js`)
 
-1. **Read Configuration File**: Reads the `ddns_provider.conf` file.
-2. **Remove Existing Cloudflare Sections**: Eliminates any existing Cloudflare entries to prevent duplication.
-3. **Download Template**: Fetches the Cloudflare DDNS template and generates up to 10 Cloudflare sections.
-4. **Update Configuration File**: Saves the updated configuration with the newly added Cloudflare entries to `ddns_provider.conf`.
+1. Reads `/etc.defaults/ddns_provider.conf` and writes a `.bak` backup.
+2. Downloads `template.js` once into a temp directory.
+3. Copies it into `/usr/syno/bin/ddns/cloudflare01.js` … `cloudflare10.js` with mode `0755`.
+4. Strips existing `[Cloudflare …]` sections and appends ten new ones, then atomically replaces the config file.
 
-### Template Details
+### Runtime template (`template.js`)
 
-The [template.js](https://raw.githubusercontent.com/NavyStack/Synology-DDNS-Helper/master/dist/cloudflare/template.js) file contains the logic required to handle Cloudflare DDNS updates. It handles parameter validation, authentication header generation, and the creation or updating of DNS records.
+Each invocation:
 
-## Customisation and Extension
+1. Validates arguments.
+2. Detects record type (`A` for IPv4, `AAAA` for IPv6).
+3. Picks an auth mode by secret shape:
+   - `cfut_` prefix → Bearer token
+   - 37-char alphanumeric + email → Global API Key
+   - otherwise → Bearer token
+4. Fetches all zones (paginated) and matches the longest suffix.
+5. Looks up records by zone/type/name:
+   - 0 → create (`ttl=120`, `proxied=false`).
+   - 1 + same IP → `nochg`.
+   - 1 + different IP → update, preserving existing TTL/proxied.
+   - more than 1 → `numhost`.
+6. Multi-host input is split on `---`, processed individually, and the worst status is reported.
 
-**Currently, this script supports only Cloudflare**, but it is structured to be easily extended to other DDNS providers. By modifying the script to update the template download URL and adjusting the logic to fit the API structure of the new provider, additional providers can be supported.
+### Synology response codes
+
+| stdout | meaning | exit code |
+| --- | --- | --- |
+| `good` | created or updated | 0 |
+| `nochg` | unchanged | 0 |
+| `badauth` | authentication failed | 1 |
+| `badparam` | invalid parameter | 1 |
+| `nohost` | zone not found | 1 |
+| `numhost` | multiple records for the same name | 1 |
+| `911` | generic failure (network, timeout, …) | 1 |
 
 ## Troubleshooting
 
-- **Configuration File Issues**: If the script cannot read or write to `ddns_provider.conf`, check your permissions. You may need to run the script with `sudo`.
-- **Download Errors**: If the template download fails, ensure you have an active internet connection and that the URL is accessible.
+- **`badauth`** — Verify the token has DNS edit permission on the target zone.
+- **`nohost`** — Token also needs `Zone : Zone : Read` on the target zone.
+- **Install failure** — Run with `sudo`. The previous config is preserved at `${path}.bak`.
+- **Logs** — `/var/log/ddns_provider.log` records each module invocation.
 
 ## Development
 
-To develop or modify the project, you may install TypeScript and Node.js type definitions:
-
 ```bash
-pnpm install --save-dev typescript @types/node
+pnpm install
+pnpm run typecheck
+pnpm run build
 ```
 
-The project is configured to use TypeScript 5.6.2 and Node.js typings version 22.7.4. You can adjust these in `package.json` if necessary.
+Bundles are written to `dist/cloudflare/` and committed so the `curl | node` install flow works.
 
 ## Project Structure
 
@@ -259,38 +286,33 @@ The project is configured to use TypeScript 5.6.2 and Node.js typings version 22
 .
 ├── LICENSE
 ├── README.md
+├── CHANGELOG.md
 ├── dist
 │   └── cloudflare
-│       ├── main.js
-│       ├── php.js
-│       └── template.js
-├── node_modules
+│       ├── main.js        # installer (bundle)
+│       ├── php.js         # PHP variant installer (deprecated, bundle)
+│       └── template.js    # DDNS runtime (bundle)
+├── src
+│   └── cloudflare
+│       ├── installer.ts   # shared installer logic
+│       ├── main.ts        # JS installer entry point
+│       ├── php.ts         # PHP installer entry point (deprecated)
+│       └── template.ts    # DDNS runtime
 ├── package.json
 ├── pnpm-lock.yaml
-├── src
-│   ├── cloudflare
-│   │   ├── main.ts
-│   │   ├── php.ts
-│   │   ├── template.ts
-│   │   └── type
-│   │       └── example.d.ts
-│   └── type
 └── tsconfig.json
 ```
 
+> ⚠️ `php.ts` / `php.js` is a legacy variant relying on an external PHP template repo. It will be removed in a future major release.
+
 ## Licence
 
-This project is licensed under the MIT Licence.
+MIT.
 
 ## Author
 
-Author: **NavyStack**
+**NavyStack**
 
 ## Contributions
 
-Feel free to open an issue or submit a pull request if you have any bug reports or suggestions for new features.
-
-## Notes
-
-- **Currently, only Cloudflare is supported**. If you want to use another DDNS provider, you will need to modify the script.
-- The template file is regularly updated via the provided URL, ensuring that the DDNS functionality remains up-to-date with Cloudflare's API.
+Bug reports and feature requests are welcome via issues or pull requests.
